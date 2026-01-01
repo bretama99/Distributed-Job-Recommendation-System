@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Distributed Job Recommendation System
 
 Hybrid, explainable job recommender with:
@@ -45,7 +44,8 @@ Hybrid, explainable job recommender with:
 
 1. Create and activate virtualenv:
 
-```bash
+for the dataset we have to create data/raw/and here the datasets
+
 python -m venv venv
 source venv/bin/activate  # or venv\Scripts\Activate.ps1 on Windows
 pip install -r requirements.txt
@@ -62,4 +62,3 @@ python -m src.features.embeddings
 python -m src.ui.gradio_app
 =======
 # Distributed-Job-Recommendation-System
->>>>>>> 81884816c57ef95b0e040ffd4bd2da5d3089824b
