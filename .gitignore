@@ -14,6 +14,7 @@ venv/
 env/
 data/
 logs/
+src copy/
 grafana-dashboards/
 tests/
 src - copy/
@@ -21,6 +22,7 @@ src - copy (2)/
 # ---- Jupyter ----
 .ipynb_checkpoints/
 .env
+
 # ---- OS ----
 .DS_Store
 Thumbs.db
