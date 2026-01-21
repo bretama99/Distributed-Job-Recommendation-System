@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Distributed Job Recommendation System
 
 Hybrid, explainable job recommender with:
@@ -60,6 +59,6 @@ PS A:\Courses\bigdata\job-rec-system> .\.venv\Scripts\Activate.ps1
 python -m src.etl.spark_jobs
 python -m src.features.embeddings
 python -m src.ui.gradio_app
-=======
-# Distributed-Job-Recommendation-System
->>>>>>> 81884816c57ef95b0e040ffd4bd2da5d3089824b
+
+
+python -c "from src.features import run_etl, compute_embeddings; from src.stores import upsert_jobs, sync_neo4j_graph; from src.features import load_jobs_df; print('ETL:', run_etl()); print('EMB:', compute_embeddings()); df=load_jobs_df(); print('Mongo upserted:', upsert_jobs(df)); print('Neo4j:', sync_neo4j_graph())"

@@ -1,28 +1,163 @@
-version: "3.9"
-
 services:
-  api:
+  app:
     build: .
-    env_file: .env
-    depends_on:
-      - mongo
-      - redis
+    container_name: app
+    env_file:
+      - .env
     ports:
-      - "8000:8000"
+      - "7860:7860"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+      - mongo-rs-init
+      - redis
+      - kafka
+      - cassandra1
+      - cassandra2
+      - cassandra3
+      - neo4j1
 
-  mongo:
-    image: mongo:6
-    restart: always
+  celery-worker:
+    build: .
+    container_name: celery-worker
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+      - kafka
+      - cassandra1
+      - cassandra2
+      - cassandra3
+      - neo4j1
+      - mongo-rs-init
+    command: ["celery", "-A", "src.tasks.celery_app", "worker", "-l", "INFO"]
+
+  celery-beat:
+    build: .
+    container_name: celery-beat
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    command: ["celery", "-A", "src.tasks.celery_app", "beat", "-l", "INFO"]
+
+  mongo1:
+    image: mongo:7
+    container_name: mongo1
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
-      - mongo_data:/data/db
+      - mongo1_data:/data/db
+
+  mongo2:
+    image: mongo:7
+    container_name: mongo2
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo2_data:/data/db
+
+  mongo3:
+    image: mongo:7
+    container_name: mongo3
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo3_data:/data/db
+
+  mongo-rs-init:
+    image: mongo:7
+    container_name: mongo-rs-init
+    depends_on:
+      - mongo1
+      - mongo2
+      - mongo3
+    volumes:
+      - ./scripts/mongo_rs_init.sh:/init.sh
+    entrypoint: ["bash", "/init.sh"]
+    restart: "no"
 
   redis:
     image: redis:7
-    restart: always
+    container_name: redis
     ports:
       - "6379:6379"
 
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+
+  cassandra1:
+    image: cassandra:4.1
+    container_name: cassandra1
+    environment:
+      CASSANDRA_CLUSTER_NAME: "jobrec"
+      CASSANDRA_SEEDS: "cassandra1,cassandra2,cassandra3"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack1"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+    ports:
+      - "9042:9042"
+    volumes:
+      - cass1:/var/lib/cassandra
+
+  cassandra2:
+    image: cassandra:4.1
+    container_name: cassandra2
+    environment:
+      CASSANDRA_CLUSTER_NAME: "jobrec"
+      CASSANDRA_SEEDS: "cassandra1,cassandra2,cassandra3"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack1"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+    volumes:
+      - cass2:/var/lib/cassandra
+
+  cassandra3:
+    image: cassandra:4.1
+    container_name: cassandra3
+    environment:
+      CASSANDRA_CLUSTER_NAME: "jobrec"
+      CASSANDRA_SEEDS: "cassandra1,cassandra2,cassandra3"
+      CASSANDRA_DC: "dc1"
+      CASSANDRA_RACK: "rack1"
+      CASSANDRA_ENDPOINT_SNITCH: "GossipingPropertyFileSnitch"
+    volumes:
+      - cass3:/var/lib/cassandra
+
+  neo4j1:
+    image: neo4j:5
+    container_name: neo4j1
+    environment:
+      NEO4J_AUTH: "neo4j/jobrecpassword"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j1:/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+
 volumes:
-  mongo_data:
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
+  cass1:
+  cass2:
+  cass3:
+  neo4j1:
+  esdata:

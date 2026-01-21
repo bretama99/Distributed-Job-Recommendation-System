@@ -13,7 +13,11 @@ build/
 venv/
 env/
 data/
+logs/
+grafana-dashboards/
 tests/
+src - copy/
+src - copy (2)/
 # ---- Jupyter ----
 .ipynb_checkpoints/
 .env

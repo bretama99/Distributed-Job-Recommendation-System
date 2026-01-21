@@ -1,0 +1,43 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Git
+.git/
+.gitignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Data / artifacts (keep if you really need them inside image)
+data/
+*.csv
+*.parquet
+*.npy
+*.pkl
+*.joblib
+
+# ML caches
+.cache/
+**/.cache/
+huggingface/
+**/huggingface/
+torch/
+**/torch/
+
+# Node (if any)
+node_modules/
+
+# Docker output
+*.tar
+*.zip
