@@ -321,13 +321,21 @@ def rag_knn(query_vec: np.ndarray, k: int) -> List[Dict[str, Any]]:
     return out
 
 # ---------------- End optional RAG ----------------
+
+
 @lru_cache(maxsize=1)
 def jobs_df():
-    return clean_df(load_jobs_df(), "job_id", ["title","company_name","location","skills","description"])
+    df = load_jobs_df()
+    df["job_id"] = df["job_id"].astype(str)
+    return df
+
 
 @lru_cache(maxsize=1)
 def users_df():
-    return clean_df(load_users_df(), "user_id", ["name","preferred_location","skills","summary"])
+    df = load_users_df()
+    df["user_id"] = df["user_id"].astype(str)
+    return df
+
 
 def sync_neo4j_graph(batch_size: int = 600) -> Dict[str, Any]:
     if not ENABLE_NEO4J_GRAPH:

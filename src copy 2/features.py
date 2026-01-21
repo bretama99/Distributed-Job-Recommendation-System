@@ -33,20 +33,6 @@ from src.config import (
 # ============================================================
 # Helpers
 # ============================================================
-def clean_df(
-    df: pd.DataFrame,
-    id_col: str,
-    text_cols: List[str],
-) -> pd.DataFrame:
-    df = df.copy()
-    if id_col in df.columns:
-        df[id_col] = df[id_col].astype(str)
-    for c in text_cols:
-        if c not in df.columns:
-            df[c] = ""
-        df[c] = df[c].fillna("").astype(str)
-    return df
-
 
 def _sha1(x: str) -> str:
     return hashlib.sha1(x.encode("utf-8", errors="ignore")).hexdigest()

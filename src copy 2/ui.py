@@ -4,7 +4,6 @@ import atexit
 import json
 from collections import Counter
 from typing import Any, Dict, List, Tuple
-from src.features import clean_df  # add to existing imports
 
 import gradio as gr
 import pandas as pd
@@ -364,11 +363,26 @@ def get_rec() -> HybridRecommender:
         REC = HybridRecommender()
     return REC
 
+
 def df_users() -> pd.DataFrame:
-    return clean_df(load_users_df(), "user_id", ["name","preferred_location","skills","summary"])
+    df = load_users_df()
+    df["user_id"] = df["user_id"].astype(str)
+    for c in ["name", "preferred_location", "skills", "summary"]:
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = df[c].fillna("").astype(str)
+    return df
+
 
 def df_jobs() -> pd.DataFrame:
-    return clean_df(load_jobs_df(), "job_id", ["title","company_name","location","skills","description"])
+    df = load_jobs_df()
+    df["job_id"] = df["job_id"].astype(str)
+    for c in ["title", "company_name", "location", "skills", "description"]:
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = df[c].fillna("").astype(str)
+    return df
+
 
 def build_user_choices(df: pd.DataFrame) -> Tuple[List[str], Dict[str, str]]:
     labels: List[str] = []
@@ -455,28 +469,44 @@ def _empty_events_df() -> pd.DataFrame:
 def _empty_job_browser_df() -> pd.DataFrame:
     return pd.DataFrame(columns=["👁", "Job ID", "Title", "Company", "Location", "Skills"])
 
+
 def _jobs_for_browser(query: str = "", limit: int = 30) -> pd.DataFrame:
-    jobs = df_jobs().copy()  # df_jobs() must already ensure required cols exist + fillna("") + astype(str)
+    jobs = df_jobs().copy()
+    for c in ["job_id", "title", "company_name", "location", "skills", "description"]:
+        if c not in jobs.columns:
+            jobs[c] = ""
+        jobs[c] = jobs[c].fillna("").astype(str)
 
     q = (query or "").strip().lower()
+
     if q:
-        blob = jobs[["title", "company_name", "location", "skills", "description"]].agg(" ".join, axis=1).str.lower()
+        blob = (
+            jobs["title"].astype(str)
+            + " "
+            + jobs["company_name"].astype(str)
+            + " "
+            + jobs["location"].astype(str)
+            + " "
+            + jobs["skills"].astype(str)
+            + " "
+            + jobs["description"].astype(str)
+        ).str.lower()
+
         jobs = jobs[blob.str.contains(q, na=False)]
 
     jobs = jobs.head(int(limit)).copy()
-    if jobs.empty:
-        return _empty_job_browser_df()
 
-    return pd.DataFrame(
+    out = pd.DataFrame(
         {
             "👁": ["👁"] * len(jobs),
-            "Job ID": jobs["job_id"],
-            "Title": jobs["title"],
-            "Company": jobs["company_name"],
-            "Location": jobs["location"],
-            "Skills": jobs["skills"].map(lambda x: _clip(x, 240)),
+            "Job ID": jobs["job_id"].astype(str),
+            "Title": jobs["title"].astype(str),
+            "Company": jobs["company_name"].astype(str),
+            "Location": jobs["location"].astype(str),
+            "Skills": jobs["skills"].astype(str).apply(lambda x: _clip(x, 240)),
         }
     )
+    return out if not out.empty else _empty_job_browser_df()
 
 
 def _format_job_details(job_id: str, uid: str | None = None, just_viewed: bool = False) -> str:
