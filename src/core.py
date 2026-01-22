@@ -21,8 +21,6 @@ from src.config import (
     LLM_RETRIES,
     LLM_TEMPERATURE,
     LLM_TIMEOUT,
-    MMR_LAMBDA,
-    MMR_MAX_CANDIDATES,
     OVERSAMPLE,
 )
 from src.features import build_user_text, ensure_ready, load_jobs_df, load_users_df, parse_skills
@@ -99,56 +97,6 @@ class Rec:
     hybrid_score: float
 
 
-def _mmr_select(
-    recs: List[Rec],
-    index: JobVectorIndex,
-    k: int,
-    mmr_lambda: float,
-) -> List[Rec]:
-    if not recs:
-        return []
-    picked: List[Rec] = []
-    picked_ids: List[str] = []
-    cand = recs[:]
-    k = min(int(k), len(cand))
-
-    while cand and len(picked) < k:
-        if not picked:
-            best = max(cand, key=lambda r: r.hybrid_score)
-            picked.append(best)
-            picked_ids.append(best.job_id)
-            cand = [r for r in cand if r.job_id != best.job_id]
-            continue
-
-        best_r: Optional[Rec] = None
-        best_val: float = -1e9
-        for r in cand:
-            rel = float(r.hybrid_score)
-            v = index.job_vector(r.job_id)
-            if v is None:
-                div = 0.0
-            else:
-                sims = []
-                for pid in picked_ids:
-                    pv = index.job_vector(pid)
-                    if pv is None:
-                        continue
-                    sims.append(float(np.dot(v, pv)))
-                div = max(sims) if sims else 0.0
-            val = mmr_lambda * rel - (1.0 - mmr_lambda) * div
-            if val > best_val:
-                best_val = val
-                best_r = r
-
-        if best_r is None:
-            break
-        picked.append(best_r)
-        picked_ids.append(best_r.job_id)
-        cand = [r for r in cand if r.job_id != best_r.job_id]
-
-    return picked
-
-
 class HybridRecommender:
     def __init__(self):
         ensure_ready()
@@ -160,8 +108,6 @@ class HybridRecommender:
         self.beta = float(HYBRID_BETA)
         self.gamma = float(HYBRID_GAMMA)
         self.delta = float(HYBRID_DELTA)
-        self.mmr_lambda = float(MMR_LAMBDA)
-
     def user_embedding(self, user_id: str) -> np.ndarray:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
@@ -198,7 +144,7 @@ class HybridRecommender:
             )
         return out
 
-    def recommend(self, user_id: str, top_k: int = 20, diversify: bool = True) -> List[Dict[str, Any]]:
+    def recommend(self, user_id: str, top_k: int = 20) -> List[Dict[str, Any]]:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
         if urow.empty:
@@ -270,12 +216,7 @@ class HybridRecommender:
             )
 
         recs.sort(key=lambda r: r.hybrid_score, reverse=True)
-        trimmed = recs[: int(top_k) * 6]
-
-        if diversify and len(trimmed) > int(top_k):
-            picked = _mmr_select(trimmed[: int(MMR_MAX_CANDIDATES)], self.index, int(top_k), float(self.mmr_lambda))
-        else:
-            picked = trimmed[: int(top_k)]
+        picked = recs[: int(top_k)]
 
         out = [asdict(r) for r in picked]
         log_event("recommend", {"user_id": uid, "top_k": int(top_k), "returned": len(out)})

@@ -11,9 +11,12 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY src /app/src
-COPY data /app/data
+
+# Your code creates needed folders too, but keep it safe for container startup
+RUN mkdir -p /app/data /app/logs
 
 ENV PYTHONPATH=/app
 
 EXPOSE 7860
+
 CMD ["python", "-m", "src.ui"]

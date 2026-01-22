@@ -108,8 +108,6 @@ HYBRID_BETA = _f(os.getenv("HYBRID_BETA"), 0.23)
 HYBRID_GAMMA = _f(os.getenv("HYBRID_GAMMA"), 0.06)
 HYBRID_DELTA = _f(os.getenv("HYBRID_DELTA"), 0.09)
 
-MMR_LAMBDA = _f(os.getenv("MMR_LAMBDA"), 0.82)
-MMR_MAX_CANDIDATES = _i(os.getenv("MMR_MAX_CANDIDATES"), 120)
 
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 

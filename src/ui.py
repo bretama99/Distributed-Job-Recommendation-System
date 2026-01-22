@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import platform
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 from src.features import clean_df  # add to existing imports
@@ -915,6 +916,7 @@ def main():
         with gr.Row():
             user_dd = gr.Dropdown(choices=labels, value=default_user, label="Select User")
             refresh_btn = gr.Button("🔄 Refresh Users", scale=0)
+            topk = gr.Slider(5, 50, value=TOP_K_DEFAULT, step=1, label="Top K")
 
         def _refresh():
             labels2, mp2, default2 = refresh_users_state()
@@ -925,7 +927,6 @@ def main():
         with gr.Tabs():
             with gr.Tab("🎯 Hybrid Recommendations"):
                 with gr.Row():
-                    topk = gr.Slider(5, 50, value=TOP_K_DEFAULT, step=1, label="Top K")
 
                     a = gr.Slider(0, 1, value=0.62, step=0.01, label="α Semantic")
                     b = gr.Slider(0, 1, value=0.23, step=0.01, label="β Graph")
@@ -1034,7 +1035,8 @@ def main():
                 reload_btn = gr.Button("🔄 Reload Data")
                 reload_btn.click(lambda: (df_users(), df_jobs()), outputs=[u_tab, j_tab])
 
-    demo.launch(server_name="0.0.0.0", share=False, show_error=True)
+    server_name = "127.0.0.1" if platform.system().lower().startswith("win") else "0.0.0.0"
+    demo.launch(server_name=server_name, share=False, show_error=True)
 
 
 if __name__ == "__main__":
