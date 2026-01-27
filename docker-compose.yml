@@ -1,77 +1,55 @@
-version: "3.9"
-
 services:
-  # -------------------------
-  # App (Gradio UI + pipeline)
-  # -------------------------
-  app:
-    build: .
-    container_name: app
-    restart: unless-stopped
-    env_file:
-      - .env
-    ports:
-      - "7860:7860"   # Gradio UI
-      - "4040:4040"   # Spark UI (only visible while a Spark job is running)
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    depends_on:
-      mongo-rs-init:
-        condition: service_completed_successfully
-      neo4j1:
-        condition: service_healthy
-    networks:
-      - jobrecnet
-
-  # -------------------------
-  # MongoDB Replica Set (rs0)
-  # -------------------------
+  # -----------------------------
+  # MongoDB Replica Set (3 nodes)
+  # -----------------------------
   mongo1:
     image: mongo:7
     container_name: mongo1
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
-    # Optional: expose only if you want to connect from your HOST machine (Compass/mongosh)
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27017:27017"
     volumes:
       - mongo1_data:/data/db
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
     networks:
       - jobrecnet
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
   mongo2:
     image: mongo:7
     container_name: mongo2
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     volumes:
       - mongo2_data:/data/db
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
     networks:
       - jobrecnet
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
   mongo3:
     image: mongo:7
     container_name: mongo3
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     volumes:
       - mongo3_data:/data/db
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok' || exit 1"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
     networks:
       - jobrecnet
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
 
+  # Initialize the replica set once (idempotent)
   mongo-rs-init:
     image: mongo:7
     container_name: mongo-rs-init
@@ -82,57 +60,96 @@ services:
         condition: service_healthy
       mongo3:
         condition: service_healthy
-    restart: "no"
-    entrypoint: >
-      bash -lc "
-      echo 'Initializing Mongo replica set (rs0)...';
-      mongosh --host mongo1 --quiet --eval '
-        try {
-          const st = rs.status();
-          if (st.ok === 1) { print(\"Replica set already initialized\"); quit(0); }
-        } catch (e) {}
-        rs.initiate({
-          _id: \"rs0\",
-          members: [
-            { _id: 0, host: \"mongo1:27017\" },
-            { _id: 1, host: \"mongo2:27017\" },
-            { _id: 2, host: \"mongo3:27017\" }
-          ]
-        });
-        print(\"Replica set initiated\");
-      ' || exit 1;
-      echo 'Mongo replica set ready.';
-      "
     networks:
       - jobrecnet
+    restart: "no"
+    command: >
+      bash -lc "
+      echo 'Waiting for mongo1...';
+      for i in {1..60}; do
+        mongosh --host mongo1:27017 --quiet --eval 'db.adminCommand({ ping: 1 })' && break;
+        sleep 2;
+      done;
 
-  # -------------------------
-  # Neo4j (skill graph)
-  # -------------------------
+      echo 'Checking replica set status...';
+      mongosh --host mongo1:27017 --quiet --eval '
+        try { rs.status(); print(\"rs already initialized\"); }
+        catch(e) {
+          print(\"initializing rs0\");
+          rs.initiate({
+            _id: \"rs0\",
+            members: [
+              { _id: 0, host: \"mongo1:27017\" },
+              { _id: 1, host: \"mongo2:27017\" },
+              { _id: 2, host: \"mongo3:27017\" }
+            ]
+          });
+        }
+      ';
+      echo 'Mongo RS init done.';
+      "
+
+  # -----------------------------
+  # Neo4j
+  # -----------------------------
   neo4j1:
     image: neo4j:5
     container_name: neo4j1
     environment:
-      NEO4J_AUTH: "neo4j/jobrecpassword"
-      # optional quality-of-life settings:
+      # Must match your .env / app config
+      NEO4J_AUTH: "neo4j/Brhane@121416"
+
+      # Optional memory tuning
       NEO4J_server_memory_pagecache_size: "512M"
       NEO4J_server_memory_heap_initial__size: "512M"
       NEO4J_server_memory_heap_max__size: "512M"
     ports:
-      - "7474:7474"   # Neo4j Browser
-      - "7687:7687"   # Bolt
+      - "7474:7474"
+      - "7687:7687"
     volumes:
       - neo4j1_data:/data
-    healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p jobrecpassword 'RETURN 1;' >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 30
     networks:
       - jobrecnet
+    healthcheck:
+      # ✅ password matches NEO4J_AUTH
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u neo4j -p 'Brhane@121416' \"RETURN 1;\" >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 40s
+
+  # -----------------------------
+  # App
+  # -----------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: app
+    env_file:
+      - .env
+    ports:
+      - "7860:7860"
+    depends_on:
+      mongo-rs-init:
+        condition: service_completed_successfully
+      neo4j1:
+        condition: service_healthy
+    networks:
+      - jobrecnet
+    restart: unless-stopped
+    volumes:
+      # ✅ ABSOLUTE BINDS (fixes the missing /app/data/external/linkedin issue)
+      - type: bind
+        source: "D:/Courses/bigdata/job-rec-system - Copy/data"
+        target: /app/data
+      - type: bind
+        source: "D:/Courses/bigdata/job-rec-system - Copy/logs"
+        target: /app/logs
 
 networks:
   jobrecnet:
+    driver: bridge
 
 volumes:
   mongo1_data:

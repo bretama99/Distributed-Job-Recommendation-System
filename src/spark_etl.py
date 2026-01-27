@@ -133,7 +133,6 @@ def etl_jobs_with_spark(
         "job_id",
         F.substring(F.sha1(F.col("_job_link_norm")), 1, 12)
     )
-    out = out.withColumn("job_id", sha1_udf(F.col("_job_link_norm")))
 
     # limit + convert to pandas
     out_pd = out.drop("_job_link_norm").limit(int(limit)).toPandas()

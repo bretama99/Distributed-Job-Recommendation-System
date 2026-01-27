@@ -157,3 +157,5 @@ Key knobs usually live in `src/config.py`:
 
 ## Course Positioning
 This system illustrates **polyglot persistence**: using specialized datastores for distinct access patterns (vector similarity search, graph traversal, and event/log analytics), consistent with Big Data architecture and NoSQL design principles.
+
+docker compose up -d --build
