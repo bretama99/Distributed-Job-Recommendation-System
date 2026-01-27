@@ -19,10 +19,14 @@ grafana-dashboards/
 tests/
 src - copy/
 src - copy (2)/
+src copy 2/
+src copy 3/
+src copy 4/
+src copy/
 # ---- Jupyter ----
 .ipynb_checkpoints/
 .env
-
+Distributed Job Recomendation System implementation project.zip
 # ---- OS ----
 .DS_Store
 Thumbs.db

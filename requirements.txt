@@ -1,18 +1,39 @@
+# --- Force CPU-only PyTorch (prevents nvidia_*_cu12 downloads) ---
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+torchvision==0.19.1+cpu
+torchaudio==2.4.1+cpu
+
+# --- Core config / utils ---
 python-dotenv
+
+# --- Data + ML basics ---
 pandas
 numpy
 scikit-learn
+
+# --- Embeddings ---
 sentence-transformers
+
+# --- Web / UI ---
 httpx
 gradio
+
+# --- Datastores used by the project ---
 pymongo
-prometheus-client
-networkx
-faiss-cpu
-celery
-redis
-kafka-python
-cassandra-driver
 neo4j
-elasticsearch
-chromadb
+
+# --- Graph / analytics ---
+networkx
+
+# --- Vector index ---
+faiss-cpu
+
+# --- Spark ETL engine ---
+pyspark
+
+# Optional (safe, helps Spark/DF conversions sometimes)
+pyarrow
+
+# Optional monitoring (keep only if your code imports it)
+prometheus-client

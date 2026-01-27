@@ -120,7 +120,7 @@ def neo4j_status() -> Dict[str, Any]:
     except Exception as e:
         return {"enabled": True, "connected": False, "error": str(e), "stats": {}}
 
-
+ 
 def upsert_jobs(df) -> int:
     ensure_indexes()
     jc = jobs_coll()

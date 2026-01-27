@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -21,8 +21,6 @@ from src.config import (
     LLM_RETRIES,
     LLM_TEMPERATURE,
     LLM_TIMEOUT,
-    MMR_LAMBDA,
-    MMR_MAX_CANDIDATES,
     OVERSAMPLE,
 )
 from src.features import build_user_text, ensure_ready, load_jobs_df, load_users_df, parse_skills
@@ -99,75 +97,53 @@ class Rec:
     hybrid_score: float
 
 
-def _mmr_select(
-    recs: List[Rec],
-    index: JobVectorIndex,
-    k: int,
-    mmr_lambda: float,
-) -> List[Rec]:
-    if not recs:
-        return []
-    picked: List[Rec] = []
-    picked_ids: List[str] = []
-    cand = recs[:]
-    k = min(int(k), len(cand))
-
-    while cand and len(picked) < k:
-        if not picked:
-            best = max(cand, key=lambda r: r.hybrid_score)
-            picked.append(best)
-            picked_ids.append(best.job_id)
-            cand = [r for r in cand if r.job_id != best.job_id]
-            continue
-
-        best_r: Optional[Rec] = None
-        best_val: float = -1e9
-        for r in cand:
-            rel = float(r.hybrid_score)
-            v = index.job_vector(r.job_id)
-            if v is None:
-                div = 0.0
-            else:
-                sims = []
-                for pid in picked_ids:
-                    pv = index.job_vector(pid)
-                    if pv is None:
-                        continue
-                    sims.append(float(np.dot(v, pv)))
-                div = max(sims) if sims else 0.0
-            val = mmr_lambda * rel - (1.0 - mmr_lambda) * div
-            if val > best_val:
-                best_val = val
-                best_r = r
-
-        if best_r is None:
-            break
-        picked.append(best_r)
-        picked_ids.append(best_r.job_id)
-        cand = [r for r in cand if r.job_id != best_r.job_id]
-
-    return picked
-
-
 class HybridRecommender:
     def __init__(self):
         ensure_ready()
         self.jobs = load_jobs_df()
         self.users = load_users_df()
+
         ensure_backends_ready()
         self.index = JobVectorIndex()
-        self.alpha = float(HYBRID_ALPHA)
-        self.beta = float(HYBRID_BETA)
-        self.gamma = float(HYBRID_GAMMA)
-        self.delta = float(HYBRID_DELTA)
-        self.mmr_lambda = float(MMR_LAMBDA)
+
+        # default weights (can be overridden per-call from UI sliders)
+        self.alpha = float(HYBRID_ALPHA)  # embedding
+        self.beta = float(HYBRID_BETA)    # graph
+        self.gamma = float(HYBRID_GAMMA)  # popularity
+        self.delta = float(HYBRID_DELTA)  # skill overlap
+
+    @staticmethod
+    def _normalized_weights(
+        base_a: float,
+        base_b: float,
+        base_g: float,
+        base_d: float,
+        alpha: float | None,
+        beta: float | None,
+        gamma: float | None,
+        delta: float | None,
+    ) -> Tuple[float, float, float, float]:
+        a = float(base_a if alpha is None else alpha)
+        b = float(base_b if beta is None else beta)
+        g = float(base_g if gamma is None else gamma)
+        d = float(base_d if delta is None else delta)
+
+        s = a + b + g + d
+        if not np.isfinite(s) or s <= 0.0:
+            # safe fallback: pure embedding signal
+            return 1.0, 0.0, 0.0, 0.0
+
+        return a / s, b / s, g / s, d / s
 
     def user_embedding(self, user_id: str) -> np.ndarray:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
         if urow.empty:
             raise ValueError(f"Unknown user_id: {uid}")
-        text = build_user_text(urow.iloc[0])
+
+        # build_user_text expects a DataFrame and returns a Series
+        text = str(build_user_text(urow).iloc[0])
+
         vec = _model().encode([text], normalize_embeddings=False)[0]
         return _l2(np.asarray(vec, dtype=np.float32))
 
@@ -178,9 +154,11 @@ class HybridRecommender:
         qv = _model().encode([q], normalize_embeddings=False)[0]
         qv = _l2(np.asarray(qv, dtype=np.float32))
         hits = self.index.search(qv, int(top_k))
+
         jobs = self.jobs.copy()
         jobs["job_id"] = jobs["job_id"].astype(str)
         jobs_idx = jobs.set_index("job_id", drop=False)
+
         out: List[Dict[str, Any]] = []
         for jid, score in hits:
             if jid not in jobs_idx.index:
@@ -198,11 +176,25 @@ class HybridRecommender:
             )
         return out
 
-    def recommend(self, user_id: str, top_k: int = 20, diversify: bool = True) -> List[Dict[str, Any]]:
+    def recommend(
+        self,
+        user_id: str,
+        top_k: int = 20,
+        alpha: float | None = None,
+        beta: float | None = None,
+        gamma: float | None = None,
+        delta: float | None = None,
+    ) -> List[Dict[str, Any]]:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
         if urow.empty:
             raise ValueError(f"Unknown user_id: {uid}")
+
+        # normalize weights using UI overrides if provided
+        a, b, g, d = self._normalized_weights(
+            self.alpha, self.beta, self.gamma, self.delta,
+            alpha, beta, gamma, delta
+        )
 
         u_sk = set(parse_skills(str(urow.iloc[0].get("skills", ""))))
         u_vec = self.user_embedding(uid)
@@ -249,10 +241,10 @@ class HybridRecommender:
                 continue
             r = jobs_idx.loc[jid]
             hybrid = (
-                self.alpha * float(dense_n[i])
-                + self.beta * float(graph_n[i])
-                + self.gamma * float(pop_n[i])
-                + self.delta * float(overlap_n[i])
+                a * float(dense_n[i])
+                + b * float(graph_n[i])
+                + g * float(pop_n[i])
+                + d * float(overlap_n[i])
             )
             recs.append(
                 Rec(
@@ -270,15 +262,18 @@ class HybridRecommender:
             )
 
         recs.sort(key=lambda r: r.hybrid_score, reverse=True)
-        trimmed = recs[: int(top_k) * 6]
-
-        if diversify and len(trimmed) > int(top_k):
-            picked = _mmr_select(trimmed[: int(MMR_MAX_CANDIDATES)], self.index, int(top_k), float(self.mmr_lambda))
-        else:
-            picked = trimmed[: int(top_k)]
+        picked = recs[: int(top_k)]
 
         out = [asdict(r) for r in picked]
-        log_event("recommend", {"user_id": uid, "top_k": int(top_k), "returned": len(out)})
+        log_event(
+            "recommend",
+            {
+                "user_id": uid,
+                "top_k": int(top_k),
+                "returned": len(out),
+                "weights": {"alpha": a, "beta": b, "gamma": g, "delta": d},
+            },
+        )
         return out
 
     def recommend_graph_only(
@@ -288,13 +283,6 @@ class HybridRecommender:
         neighbor_limit: int = 200,
         min_w: int = 1,
     ) -> List[Dict[str, Any]]:
-        """
-        Pure graph-based job retrieval + ranking using Neo4j only (no FAISS, no Mongo popularity).
-
-        The ranking uses:
-            raw = 10*shared_skills + sqrt(co_occurrence_sum)
-        and returns results sorted by raw descending (and a normalized graph_score in [0..1]).
-        """
         from src.neo4j_store import get_neo4j_graph  # local import to avoid import-time Neo4j failures
 
         uid = str(user_id)
@@ -404,7 +392,17 @@ def explain_rag(user_id: str, recs: List[Dict[str, Any]], jobs_df) -> List[str]:
         )
 
         query = f"{u_text} {title} skills {skills}\n{desc[:800]}"
-        chunks = rag_knn(query, k=4, job_id=jid) or []
+        qv = _model().encode([query], normalize_embeddings=False)[0]
+        qv = _l2(np.asarray(qv, dtype=np.float32))
+
+        # get more, then filter to this job_id
+        all_chunks = rag_knn(qv, k=30) or []
+        chunks = [c for c in all_chunks if str(c.get("job_id", "")) == jid][:4]
+
+        # fallback: if nothing matches that job_id, just use top chunks
+        if not chunks:
+            chunks = all_chunks[:4]
+
         if chunks:
             sources = _format_sources(chunks)
             evidence = evidence + "\nSources:\n" + sources

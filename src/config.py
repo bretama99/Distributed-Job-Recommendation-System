@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -53,10 +52,11 @@ for p in (DATA_DIR, DATA_RAW, DATA_PROCESSED, DATA_EXTERNAL):
 
 LINKEDIN_DIR = Path(os.getenv("LINKEDIN_DIR", str(DATA_EXTERNAL / "linkedin")))
 
-def _pick_existing(*candidates: Path) -> Path:
+
+def _pick_existing(*candidates: Optional[Path]) -> Path:
     for p in candidates:
         try:
-            if p and p.exists():
+            if p is not None and p.exists():
                 return p
         except Exception:
             pass
@@ -64,6 +64,7 @@ def _pick_existing(*candidates: Path) -> Path:
         if p is not None:
             return p
     return DATA_EXTERNAL
+
 
 LINKEDIN_POSTS = _pick_existing(
     Path(os.getenv("LINKEDIN_POSTS")) if os.getenv("LINKEDIN_POSTS") else None,
@@ -108,7 +109,6 @@ HYBRID_BETA = _f(os.getenv("HYBRID_BETA"), 0.23)
 HYBRID_GAMMA = _f(os.getenv("HYBRID_GAMMA"), 0.06)
 HYBRID_DELTA = _f(os.getenv("HYBRID_DELTA"), 0.09)
 
-
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
 
 LLM_API_BASE = os.getenv("LLM_API_BASE", "https://api.groq.com/openai/v1")
@@ -137,22 +137,6 @@ NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 NEO4J_MAX_CONNECTION_POOL_SIZE = _i(os.getenv("NEO4J_MAX_CONNECTION_POOL_SIZE"), 20)
 NEO4J_CONNECTION_TIMEOUT = _i(os.getenv("NEO4J_CONNECTION_TIMEOUT"), 30)
 
-ENABLE_REDIS_CACHE = _b(os.getenv("ENABLE_REDIS_CACHE"), False)
-ENABLE_CASSANDRA_EVENTS = _b(os.getenv("ENABLE_CASSANDRA_EVENTS"), False)
-ENABLE_KAFKA_STREAMING = _b(os.getenv("ENABLE_KAFKA_STREAMING"), False)
-ELASTICSEARCH_ENABLED = _b(os.getenv("ELASTICSEARCH_ENABLED"), False)
-ENABLE_ADVANCED_RAG = _b(os.getenv("ENABLE_ADVANCED_RAG"), False)
-
-PROMETHEUS_ENABLED = _b(os.getenv("PROMETHEUS_ENABLED"), False)
-PROMETHEUS_PORT = _i(os.getenv("PROMETHEUS_PORT"), 8000)
-
-VECTOR_DB_TYPE = os.getenv("VECTOR_DB_TYPE", "faiss")
-CHROMA_PERSIST_DIR = Path(os.getenv("CHROMA_PERSIST_DIR", str(DATA_DIR / "chromadb")))
-# ===================== LLM API Key (Groq / OpenAI-compatible) =====================
-# Accept multiple env var names for compatibility:
-# - LLM_API_KEY (preferred)
-# - GROQ_API_KEY (your current .env)
-# - OPENAI_API_KEY (fallback)
 LLM_API_KEY = (
     os.getenv("LLM_API_KEY")
     or os.getenv("GROQ_API_KEY")

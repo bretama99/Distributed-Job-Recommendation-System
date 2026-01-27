@@ -4,6 +4,7 @@ import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import os
 
 import numpy as np
 from pymongo import MongoClient, ReturnDocument, UpdateOne
@@ -13,7 +14,6 @@ from pymongo.write_concern import WriteConcern
 
 import src.config as cfg
 from src.config import (
-    ENABLE_ADVANCED_RAG,
     ENABLE_NEO4J_GRAPH,
     JOB_EMB_NPY,
     JOB_IDS_NPY,
@@ -120,17 +120,22 @@ def neo4j_status() -> Dict[str, Any]:
     except Exception as e:
         return {"enabled": True, "connected": False, "error": str(e), "stats": {}}
 
-
 def upsert_jobs(df) -> int:
     ensure_indexes()
     jc = jobs_coll()
+    if jc is None or df is None or len(df) == 0:
+        return 0
+
     now = int(time.time())
+    reset_views = str(os.getenv("RESET_VIEWS_ON_SYNC", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
     ops: List[UpdateOne] = []
     for _, r in df.iterrows():
         jid = str(r.get("job_id", "")).strip()
         if not jid:
             continue
-        doc = {
+
+        base_doc = {
             "job_id": jid,
             "title": str(r.get("title", "")),
             "company_name": str(r.get("company_name", "")),
@@ -139,15 +144,21 @@ def upsert_jobs(df) -> int:
             "description": str(r.get("description", "")),
             "updated_at": now,
         }
-        ops.append(
-            UpdateOne(
-                {"job_id": jid},
-                {"$set": doc, "$setOnInsert": {"views": 0, "created_at": now}},
-                upsert=True,
-            )
-        )
+
+        update_doc: Dict[str, Any] = {
+            "$set": base_doc,
+            "$setOnInsert": {"created_at": now, "views": 0, "last_view_at": None},
+        }
+
+        if reset_views:
+            update_doc["$set"]["views"] = 0
+            update_doc["$set"]["last_view_at"] = None
+
+        ops.append(UpdateOne({"job_id": jid}, update_doc, upsert=True))
+
     if not ops:
         return 0
+
     jc.bulk_write(ops, ordered=False)
     return len(ops)
 
@@ -167,36 +178,66 @@ def get_job_popularity(job_id: str | int) -> int:
         return 0
     return int(doc.get("views") or 0)
 
-
-def increment_job_popularity(job_id: str | int, delta: int = 1, user_id: Optional[str] = None) -> int:
+def increment_job_popularity(job_id: str, inc: int = 1, user_id: str | None = None) -> int:
     ensure_indexes()
     jc = jobs_coll()
-    jid = str(job_id)
-    d = max(int(delta), 0)
-    doc = jc.find_one_and_update(
+    ec = events_coll()
+    if jc is None:
+        return 0
+
+    jid = str(job_id).strip()
+    if not jid:
+        return 0
+
+    now = int(time.time())
+    inc_val = int(inc) if int(inc) > 0 else 1
+
+    jc.update_one(
         {"job_id": jid},
         {
-            "$inc": {"views": d},
-            "$set": {"last_view_at": int(time.time())},
-            "$setOnInsert": {"job_id": jid, "created_at": int(time.time())},
+            "$inc": {"views": inc_val},
+            "$set": {"updated_at": now, "last_view_at": now},
+            "$setOnInsert": {"created_at": now},
         },
         upsert=True,
-        return_document=ReturnDocument.AFTER,
-        projection={"views": 1},
     )
-    if user_id is not None:
-        log_event("view", {"user_id": str(user_id), "job_id": jid})
-    return int((doc or {}).get("views") or 0)
 
+    if ec is not None:
+        payload: Dict[str, Any] = {"job_id": jid}
+        if user_id is not None:
+            payload["user_id"] = str(user_id)
+
+        ec.insert_one({"type": "view", "ts": now, "payload": payload})
+
+    doc = jc.find_one({"job_id": jid}, {"_id": 0, "views": 1})
+    return int((doc or {}).get("views", 0))
 
 def analytics_popularity(limit: int = 15) -> Dict[str, Any]:
     ensure_indexes()
     jc = jobs_coll()
     ec = events_coll()
-    top_jobs = list(jc.find({}, {"_id": 0}).sort("views", -1).limit(int(limit)))
-    recent_events = list(ec.find({}, {"_id": 0}).sort("ts", -1).limit(int(limit)))
-    return {"top_jobs": top_jobs, "recent_events": recent_events}
+    if jc is None or ec is None:
+        return {"top_jobs": [], "recent_events": []}
 
+    lim = int(limit) if int(limit) > 0 else 15
+
+    top_jobs = list(
+        jc.find({}, {"_id": 0})
+        .sort([("views", -1), ("last_view_at", -1), ("job_id", 1)])
+        .limit(lim)
+    )
+
+    recent_events = list(
+        ec.find({}, {"_id": 0})
+        .sort([("ts", -1)])
+        .limit(lim)
+    )
+
+    for j in top_jobs:
+        if "views" not in j or j["views"] is None:
+            j["views"] = 0
+
+    return {"top_jobs": top_jobs, "recent_events": recent_events}
 
 def _l2_rows(x: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(x, axis=-1, keepdims=True)
@@ -236,70 +277,6 @@ class JobVectorIndex:
             out.append((str(self.ids[int(i)]), float(s)))
         return out
 
-
-# ---------------- Optional RAG chunk index (safe + fully optional) ----------------
-
-class RagChunkIndex:
-    def __init__(self):
-        if REQUIRE_FAISS and not _HAS_FAISS:
-            raise RuntimeError("FAISS is required but not installed")
-
-        rag_emb_npy = Path(getattr(cfg, "RAG_EMB_NPY", "data/processed/rag_embeddings.npy"))
-        rag_chunk_ids_npy = Path(getattr(cfg, "RAG_CHUNK_IDS_NPY", "data/processed/rag_chunk_ids.npy"))
-        rag_job_ids_npy = Path(getattr(cfg, "RAG_JOB_IDS_NPY", "data/processed/rag_job_ids.npy"))
-
-        if not (rag_emb_npy.exists() and rag_chunk_ids_npy.exists() and rag_job_ids_npy.exists()):
-            raise FileNotFoundError("RAG artifacts missing")
-
-        emb = np.load(rag_emb_npy, allow_pickle=True).astype("float32")
-        self.chunk_ids = np.load(rag_chunk_ids_npy, allow_pickle=True).astype(str)
-        self.job_ids = np.load(rag_job_ids_npy, allow_pickle=True).astype(str)
-
-        if emb.ndim != 2:
-            raise ValueError("rag embeddings must be 2D")
-
-        self.emb = _l2_rows(emb)
-        d = self.emb.shape[1]
-        idx = faiss.IndexFlatIP(d)
-        idx.add(self.emb)
-        self._faiss = idx
-
-    def search(self, query_vec: np.ndarray, k: int) -> List[Tuple[int, float]]:
-        q = query_vec.reshape(1, -1).astype("float32")
-        q = _l2_rows(q)
-        D, I = self._faiss.search(q, int(k))
-        out: List[Tuple[int, float]] = []
-        for s, i in zip(D[0], I[0]):
-            if int(i) < 0:
-                continue
-            out.append((int(i), float(s)))
-        return out
-
-
-@lru_cache(maxsize=1)
-def rag_chunks_df():
-    rag_chunks_csv = Path(getattr(cfg, "RAG_CHUNKS_CSV", "data/processed/rag_chunks.csv"))
-    if not rag_chunks_csv.exists():
-        raise FileNotFoundError("RAG chunks CSV missing")
-    import pandas as pd  # local import
-
-    df = pd.read_csv(rag_chunks_csv)
-    df["chunk_id"] = df["chunk_id"].astype(str)
-    df["job_id"] = df["job_id"].astype(str)
-    df["text"] = df["text"].fillna("").astype(str)
-    return df
-
-
-@lru_cache(maxsize=1)
-def rag_index() -> Optional[RagChunkIndex]:
-    if not ENABLE_ADVANCED_RAG:
-        return None
-    try:
-        return RagChunkIndex()
-    except Exception:
-        return None
-
-
 def rag_knn(query_vec: np.ndarray, k: int) -> List[Dict[str, Any]]:
     idx = rag_index()
     if idx is None:
@@ -320,14 +297,24 @@ def rag_knn(query_vec: np.ndarray, k: int) -> List[Dict[str, Any]]:
         )
     return out
 
-# ---------------- End optional RAG ----------------
 @lru_cache(maxsize=1)
 def jobs_df():
-    return clean_df(load_jobs_df(), "job_id", ["title","company_name","location","skills","description"])
+    df = load_jobs_df()
+    df["job_id"] = df["job_id"].astype(str)
+    return df
+@lru_cache(maxsize=1)
+def rag_index() -> Optional[RagChunkIndex]:
+    try:
+        return RagChunkIndex()
+    except Exception:
+        return None
 
 @lru_cache(maxsize=1)
 def users_df():
-    return clean_df(load_users_df(), "user_id", ["name","preferred_location","skills","summary"])
+    df = load_users_df()
+    df["user_id"] = df["user_id"].astype(str)
+    return df
+
 
 def sync_neo4j_graph(batch_size: int = 600) -> Dict[str, Any]:
     if not ENABLE_NEO4J_GRAPH:

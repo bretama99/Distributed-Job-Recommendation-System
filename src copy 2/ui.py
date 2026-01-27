@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import atexit
+import os
 import json
+import time
 from collections import Counter
 from typing import Any, Dict, List, Tuple
 
 import gradio as gr
 import pandas as pd
 
-from src.config import APP_TITLE, TOP_K_DEFAULT, PROMETHEUS_ENABLED, PROMETHEUS_PORT
+from src.config import APP_TITLE, TOP_K_DEFAULT, PROMETHEUS_ENABLED, PROMETHEUS_PORT, DATA_PROCESSED
 from src.core import HybridRecommender, explain_global, explain_rag, record_view
 from src.features import (
     ensure_ready,
@@ -38,9 +40,7 @@ except Exception:
     pass
 
 
-CSS = """/* =======================================================================
-   FIX: Remove Gradio max-width constraints that cause big left/right margins
-   ======================================================================= */
+CSS = """/* Full width layout */
 html, body, #root {
   width: 100% !important;
   margin: 0 !important;
@@ -52,15 +52,11 @@ html, body, #root {
   width: 100% !important;
   margin: 0 !important;
   padding: 0 !important;
-  box-sizing: border-box !important;
-
-  /* Gradio layout variables that often enforce centered/narrow content */
   --layout-max-width: 100% !important;
   --prose-max-width: 100% !important;
   --block-max-width: 100% !important;
 }
 
-/* Common wrappers used by Gradio to clamp width */
 .gradio-container .contain,
 .gradio-container .wrap,
 .gradio-container .container,
@@ -70,283 +66,183 @@ html, body, #root {
 .gradio-container .app {
   max-width: 100% !important;
   width: 100% !important;
-  margin-left: 0 !important;
-  margin-right: 0 !important;
-  box-sizing: border-box !important;
+  margin: 0 !important;
+  padding: 8px !important;
 }
 
-/* Small comfortable side gutter (tune: 6px / 8px / 10px) */
-.gradio-container .wrap,
-.gradio-container .container,
-.gradio-container .main,
-.gradio-container .prose,
-.gradio-container .content {
-  padding-left: 8px !important;
-  padding-right: 8px !important;
-}
-
-/* Main content area (reduce if you want even tighter) */
-.gradio-container > .main {
-  padding: 12px 8px !important;
-}
-
-/* =======================================================================
-   Your existing styling (kept)
-   ======================================================================= */
-
-/* Header styling */
+/* Clean header */
 h1 {
-  font-size: 2rem !important;
-  font-weight: 700 !important;
-  margin-bottom: 8px !important;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
-  -webkit-background-clip: text !important;
-  -webkit-text-fill-color: transparent !important;
-  background-clip: text !important;
+  font-size: 1.5rem !important;
+  font-weight: 600 !important;
+  margin: 0 0 12px 0 !important;
 }
 
-/* Subtitle styling */
-.gradio-container p {
-  color: #94a3b8 !important;
-  margin-bottom: 24px !important;
-}
-
-/* Tab styling */
+/* Simple tabs */
 .tabs {
-  border-bottom: 2px solid #334155 !important;
-  margin-bottom: 24px !important;
+  border-bottom: 1px solid #ddd !important;
+  margin-bottom: 12px !important;
 }
 
 .tab-nav button {
-  font-weight: 600 !important;
-  padding: 12px 20px !important;
-  color: #94a3b8 !important;
+  padding: 8px 16px !important;
   border: none !important;
-  border-bottom: 3px solid transparent !important;
-  transition: all 0.3s ease !important;
-}
-
-.tab-nav button:hover {
-  color: #e2e8f0 !important;
-  background: rgba(100, 116, 139, 0.1) !important;
+  border-bottom: 2px solid transparent !important;
 }
 
 .tab-nav button.selected {
-  color: #667eea !important;
-  border-bottom-color: #667eea !important;
-  background: rgba(102, 126, 234, 0.1) !important;
+  border-bottom-color: #2563eb !important;
 }
 
-/* Button styling */
+/* Clean buttons */
 .gr-button {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+  background: #2563eb !important;
   border: none !important;
   color: white !important;
-  font-weight: 600 !important;
-  padding: 12px 24px !important;
-  border-radius: 8px !important;
-  transition: all 0.3s ease !important;
-  box-shadow: 0 4px 6px rgba(102, 126, 234, 0.3) !important;
-}
-
-.gr-button:hover {
-  transform: translateY(-2px) !important;
-  box-shadow: 0 6px 12px rgba(102, 126, 234, 0.4) !important;
-}
-
-.gr-button:active {
-  transform: translateY(0) !important;
-}
-
-/* Input styling */
-.gr-box, .gr-input, .gr-dropdown {
-  background: #1e293b !important;
-  border: 1px solid #334155 !important;
-  border-radius: 8px !important;
-  color: #e2e8f0 !important;
-  transition: all 0.3s ease !important;
-}
-
-.gr-box:focus, .gr-input:focus, .gr-dropdown:focus {
-  border-color: #667eea !important;
-  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
-}
-
-/* Slider styling */
-.gr-slider input[type="range"] {
-  background: linear-gradient(to right, #667eea 0%, #764ba2 100%) !important;
-  height: 6px !important;
-  border-radius: 3px !important;
-}
-
-.gr-slider input[type="range"]::-webkit-slider-thumb {
-  background: #667eea !important;
-  border: 3px solid white !important;
-  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.5) !important;
-  width: 20px !important;
-  height: 20px !important;
-}
-
-/* Checkbox styling */
-.gr-checkbox {
-  accent-color: #667eea !important;
-}
-
-.gr-checkbox-label {
-  color: #e2e8f0 !important;
-  font-weight: 500 !important;
-}
-
-/* Label styling */
-label {
-  color: #cbd5e1 !important;
-  font-weight: 600 !important;
+  padding: 8px 16px !important;
+  border-radius: 4px !important;
   font-size: 0.875rem !important;
-  text-transform: uppercase !important;
-  letter-spacing: 0.05em !important;
-  margin-bottom: 8px !important;
 }
 
-/* Dataframe styling */
+/* Minimal inputs */
+.gr-box, .gr-input, .gr-dropdown {
+  border: 1px solid #ddd !important;
+  border-radius: 4px !important;
+  padding: 6px 12px !important;
+}
+
+/* Simple labels */
+label {
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  margin-bottom: 4px !important;
+  text-transform: none !important;
+}
+
+/* Data tables - maximize space */
 .gradio-dataframe {
   width: 100% !important;
   overflow: auto !important;
-  border-radius: 8px !important;
-  border: 1px solid #334155 !important;
-  background: #1e293b !important;
+  border: 1px solid #ddd !important;
+  border-radius: 4px !important;
 }
 
 .gradio-dataframe table {
   table-layout: auto !important;
-  border-collapse: separate !important;
-  border-spacing: 0 !important;
+  border-collapse: collapse !important;
+  font-size: 0.875rem !important;
 }
 
 .gradio-dataframe td,
 .gradio-dataframe th {
   white-space: nowrap !important;
-  padding: 12px 16px !important;
-  border-bottom: 1px solid #334155 !important;
-  color: #e2e8f0 !important;
+  padding: 8px 12px !important;
+  border-bottom: 1px solid #eee !important;
 }
 
 .gradio-dataframe thead th {
   position: sticky !important;
   top: 0 !important;
   z-index: 2 !important;
-  background: #0f172a !important;
-  font-weight: 700 !important;
-  text-transform: uppercase !important;
+  background: #f8f9fa !important;
+  font-weight: 600 !important;
   font-size: 0.75rem !important;
-  letter-spacing: 0.05em !important;
-  color: #94a3b8 !important;
-  border-bottom: 2px solid #667eea !important;
+  border-bottom: 2px solid #ddd !important;
 }
 
 .gradio-dataframe tbody tr:hover {
-  background: rgba(102, 126, 234, 0.1) !important;
+  background: #f8f9fa !important;
 }
 
-/* Heights for different dataframe sizes */
+/* Table heights */
 .df-big .gradio-dataframe {
-  height: 72vh !important;
-  max-height: 72vh !important;
+  height: 75vh !important;
+  max-height: 75vh !important;
 }
 
 .df-mid .gradio-dataframe {
-  height: 52vh !important;
-  max-height: 52vh !important;
+  height: 55vh !important;
+  max-height: 55vh !important;
 }
 
 .df-small .gradio-dataframe {
-  height: 38vh !important;
-  max-height: 38vh !important;
+  height: 40vh !important;
+  max-height: 40vh !important;
 }
 
-/* Markdown styling */
-.markdown-text {
-  color: #e2e8f0 !important;
-  line-height: 1.7 !important;
-}
-
-.markdown-text h3 {
-  color: #667eea !important;
-  font-weight: 700 !important;
-  margin-top: 16px !important;
-  margin-bottom: 12px !important;
-}
-
-.markdown-text strong {
-  color: #e2e8f0 !important;
-  font-weight: 700 !important;
-}
-
-/* Row styling */
+/* Compact rows */
 .gr-row {
-  gap: 16px !important;
+  gap: 12px !important;
 }
 
-/* Card-like appearance for sections */
-.gr-panel {
-  background: #1e293b !important;
-  border-radius: 12px !important;
-  padding: 20px !important;
-  border: 1px solid #334155 !important;
-  margin-bottom: 16px !important;
-}
-
-/* Scrollbar styling */
+/* Clean scrollbars */
 ::-webkit-scrollbar {
-  width: 10px !important;
-  height: 10px !important;
+  width: 8px !important;
+  height: 8px !important;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0f172a !important;
-  border-radius: 5px !important;
+  background: #f1f1f1 !important;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155 !important;
-  border-radius: 5px !important;
+  background: #888 !important;
+  border-radius: 4px !important;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569 !important;
-}
-
-/* Radio button styling */
-.gr-radio label {
-  color: #e2e8f0 !important;
-  padding: 8px 16px !important;
-  border-radius: 6px !important;
-  transition: all 0.2s ease !important;
-}
-
-.gr-radio label:hover {
-  background: rgba(102, 126, 234, 0.1) !important;
-}
-
-.gr-radio input:checked + label {
-  background: rgba(102, 126, 234, 0.2) !important;
-  color: #667eea !important;
-  font-weight: 600 !important;
-}
-
-/* Responsive padding adjustments */
-@media (max-width: 768px) {
-  .gradio-container > .main {
-    padding: 10px 8px !important;
-  }
-
-  .gr-button {
-    padding: 10px 16px !important;
-    font-size: 0.875rem !important;
-  }
+  background: #555 !important;
 }
 """
 
+THEME = gr.themes.Soft(
+    primary_hue="indigo",
+    secondary_hue="purple",
+    neutral_hue="slate",
+)
+
+
+
+# Limit the number of users sent to the browser (prevents dropdown freeze)
+MAX_USER_CHOICES = 30
+
 REC: HybridRecommender | None = None
+
+def _reset_runtime() -> None:
+    """Reset cached data/models after regenerating artifacts from the UI."""
+    global REC
+    REC = None
+
+    # Clear cached embedding model
+    try:
+        import src.core as _core_mod
+        try:
+            _core_mod._model.cache_clear()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Clear cached dataframes + force backend re-sync on next use
+    try:
+        import src.stores as _stores_mod
+        for fn in ("jobs_df", "users_df", "rag_chunks_df", "rag_index", "ensure_indexes"):
+            try:
+                getattr(_stores_mod, fn).cache_clear()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        try:
+            _stores_mod._backends_ready = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        try:
+            _stores_mod.close_mongo()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 
 
 def _clip(x: Any, n: int = 240) -> str:
@@ -716,9 +612,6 @@ def skill_graph_insights(user_label: str, mapping: Dict[str, str], top_k: int):
 
     rec = get_rec()
 
-    # ✅ Graph-only retrieval & ranking (Neo4j), no UI knobs
-    # We keep parameters internally but do not expose them in UI.
-    # neighbor_limit very large = effectively "no limit" in practice.
     recs = rec.recommend_graph_only(
         uid,
         int(top_k),
@@ -890,7 +783,10 @@ def explain_tab(user_label: str, mapping: Dict[str, str], top_k: int, mode: str)
 
 
 def pipeline_health():
-    etl = ensure_ready()
+    try:
+        etl = ensure_ready()
+    except Exception as e:
+        etl = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     stores = {"mongo": mongo_status(), "neo4j": neo4j_status()}
     j = df_jobs()
     u = df_users()
@@ -901,24 +797,60 @@ def pipeline_health():
 
 
 def run_etl_btn():
-    r = run_etl()
-    return f"### ✅ ETL Completed\nJobs: **{r.get('jobs')}** | Users: **{r.get('users')}** | Seconds: **{r.get('seconds')}**"
+    _reset_runtime()
+    started = time.time()
+    try:
+        r = run_etl()
+        secs = round(time.time() - started, 3)
+        jobs_n = r.get("jobs_rows", r.get("jobs", 0))
+        users_n = r.get("users_rows", r.get("users", 0))
+        ratio = r.get("jobs_empty_skills_ratio", None)
+        ratio_s = f"{float(ratio):.3f}" if ratio is not None else "N/A"
+        return (
+            "### ✅ ETL Completed\n"
+            f"- Jobs: **{jobs_n}**\n"
+            f"- Users: **{users_n}**\n"
+            f"- Empty skills ratio (jobs): **{ratio_s}**\n"
+            f"- Saved: `{r.get('jobs_csv', '')}` and `{r.get('users_csv', '')}`\n"
+            f"- Seconds: **{secs}**"
+        )
+    except Exception as e:
+        return f"### ❌ ETL Failed\n`{type(e).__name__}: {e}`"
 
 
 def run_emb_btn():
-    r = compute_embeddings()
-    return f"### ✅ Embeddings Computed\nJobsEmb: **{r.get('jobs_emb')}** | UsersEmb: **{r.get('users_emb')}** | Seconds: **{r.get('seconds')}**"
+    _reset_runtime()
+    started = time.time()
+    try:
+        r = compute_embeddings()
+        secs = round(time.time() - started, 3)
+        jobs_n = r.get("jobs", r.get("jobs_emb", 0))
+        users_n = r.get("users", r.get("users_emb", 0))
+        return (
+            "### ✅ Embeddings Computed\n"
+            f"- Jobs embeddings: **{jobs_n}**\n"
+            f"- Users embeddings: **{users_n}**\n"
+            f"- Output folder: `{DATA_PROCESSED}`\n"
+            f"- Seconds: **{secs}**"
+        )
+    except Exception as e:
+        return f"### ❌ Embeddings Failed\n`{type(e).__name__}: {e}`"
 
 
 def mongo_sync_btn():
+    _reset_runtime()
     j = df_jobs()
     n = upsert_jobs(j)
     return f"### ✅ Mongo Sync\nJobs upserted: **{n}**"
 
 
 def neo4j_sync_btn():
+    _reset_runtime()
     r = sync_neo4j_graph()
-    return f"### ✅ Neo4j Sync\nUsers: **{r.get('users')}** | Jobs: **{r.get('jobs')}** | CO_OCCURS: **{(r.get('co_occurs') or {}).get('pairs')}**"
+    if not (r or {}).get("ok", False):
+        return f"### ❌ Neo4j Sync Failed\n`{(r or {}).get('error', 'unknown error')}`"
+    pairs = ((r.get("co_occurs") or {}) if isinstance(r, dict) else {}).get("pairs", "")
+    return f"### ✅ Neo4j Sync\nUsers: **{r.get('users')}** | Jobs: **{r.get('jobs')}** | CO_OCCURS pairs: **{pairs}**"
 
 
 def main():
@@ -927,32 +859,48 @@ def main():
 
     users = df_users()
     labels, mp = build_user_choices(users)
-    default_user = labels[0] if labels else None
+    initial_labels = labels[:MAX_USER_CHOICES]
+    default_user = initial_labels[0] if initial_labels else None
 
     with gr.Blocks(
         title=APP_TITLE,
-        css=CSS,
-        theme=gr.themes.Soft(
-            primary_hue="indigo",
-            secondary_hue="purple",
-            neutral_hue="slate",
-        ),
     ) as demo:
-        gr.Markdown(f"# {APP_TITLE}\nEmbeddings + Neo4j Graph + Mongo Popularity")
+        gr.Markdown(f"# {APP_TITLE}\n")
 
         mapping_state = gr.State(mp)
 
         with gr.Row():
-            user_dd = gr.Dropdown(choices=labels, value=default_user, label="Select User")
+            # Keep initial list small for fast load; when the dropdown is focused, we load all users
+            user_dd = gr.Dropdown(
+                choices=initial_labels,
+                value=default_user,
+                label="Select User",
+                scale=3,
+                filterable=True,
+            )
             refresh_btn = gr.Button("🔄 Refresh Users", scale=0)
 
-        def _refresh():
+        def _refresh(current_label: str | None):
             labels2, mp2, default2 = refresh_users_state()
-            return gr.update(choices=labels2, value=default2), mp2
+            # After refresh, load all users so dropdown search can match any user
+            all_labels2 = list(labels2)
+            val2 = current_label if (current_label in all_labels2) else (default2 if default2 in all_labels2 else (all_labels2[0] if all_labels2 else None))
+            return gr.update(choices=all_labels2, value=val2), mp2
 
-        refresh_btn.click(_refresh, outputs=[user_dd, mapping_state])
+        refresh_btn.click(_refresh, inputs=[user_dd], outputs=[user_dd, mapping_state])
+
+        def _on_user_focus(mapping: Dict[str, str], current_label: str | None):
+            # Load full list of users on focus so built-in dropdown search works over all users
+            labels_all = list((mapping or {}).keys())
+            if not labels_all:
+                return gr.update()
+            val = current_label if (current_label in labels_all) else labels_all[0]
+            return gr.update(choices=labels_all, value=val)
+
+        user_dd.focus(_on_user_focus, inputs=[mapping_state, user_dd], outputs=[user_dd])
 
         with gr.Tabs():
+
             with gr.Tab("🎯 Hybrid Recommendations"):
                 with gr.Row():
                     topk = gr.Slider(5, 50, value=TOP_K_DEFAULT, step=1, label="Top K")
@@ -1064,8 +1012,44 @@ def main():
                 reload_btn = gr.Button("🔄 Reload Data")
                 reload_btn.click(lambda: (df_users(), df_jobs()), outputs=[u_tab, j_tab])
 
-    demo.launch(server_name="0.0.0.0", share=False, show_error=True)
+    server_name = os.getenv("GRADIO_SERVER_NAME", "127.0.0.1")
+    server_port = int(os.getenv("GRADIO_SERVER_PORT", "7860"))
+    demo.launch(
+        server_name=server_name,
+        server_port=server_port,
+        share=False,
+        show_error=True,
+        css=CSS,
+        theme=THEME,
+    )
 
 
 if __name__ == "__main__":
     main()
+
+
+def filter_user_choices(
+    query: str | None,
+    labels: List[str],
+    current_value: str | None = None,
+) -> Tuple[List[str], str | None]:
+    """Return (choices, value) for the user dropdown.
+
+    - If query is empty -> first MAX_USER_CHOICES.
+    - Otherwise -> first MAX_USER_CHOICES matches by substring (case-insensitive).
+    - Keeps current_value if still present.
+    """
+    q = (query or "").strip().lower()
+    if not labels:
+        return [], None
+
+    if not q:
+        choices = labels[:MAX_USER_CHOICES]
+    else:
+        choices = [lab for lab in labels if q in lab.lower()][:MAX_USER_CHOICES]
+
+    if not choices:
+        return [], None
+
+    val = current_value if current_value in choices else choices[0]
+    return choices, val

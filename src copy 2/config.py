@@ -99,8 +99,8 @@ APP_TITLE = os.getenv("APP_TITLE", "Distributed Job Recommendation System")
 APP_INSTANCE = os.getenv("APP_INSTANCE", "app1")
 
 TOP_K_DEFAULT = _i(os.getenv("TOP_K_DEFAULT"), 15)
-MAX_JOBS = _i(os.getenv("MAX_JOBS"), 8000)
-N_USERS = _i(os.getenv("N_USERS"), 2000)
+MAX_JOBS = _i(os.getenv("MAX_JOBS"), 80000)
+N_USERS = _i(os.getenv("N_USERS"), 20000)
 OVERSAMPLE = _i(os.getenv("OVERSAMPLE"), 6)
 
 HYBRID_ALPHA = _f(os.getenv("HYBRID_ALPHA"), 0.62)
@@ -150,11 +150,7 @@ PROMETHEUS_PORT = _i(os.getenv("PROMETHEUS_PORT"), 8000)
 
 VECTOR_DB_TYPE = os.getenv("VECTOR_DB_TYPE", "faiss")
 CHROMA_PERSIST_DIR = Path(os.getenv("CHROMA_PERSIST_DIR", str(DATA_DIR / "chromadb")))
-# ===================== LLM API Key (Groq / OpenAI-compatible) =====================
-# Accept multiple env var names for compatibility:
-# - LLM_API_KEY (preferred)
-# - GROQ_API_KEY (your current .env)
-# - OPENAI_API_KEY (fallback)
+
 LLM_API_KEY = (
     os.getenv("LLM_API_KEY")
     or os.getenv("GROQ_API_KEY")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple, Optional
 
 from neo4j import GraphDatabase
 
@@ -148,6 +148,77 @@ class Neo4jGraphStore:
         if mx <= 0.0:
             return {k: 0.0 for k in raw.keys()}
         return {k: float(v) / float(mx) for k, v in raw.items()}
+
+    def graph_search_jobs(
+        self,
+        user_id: str,
+        top_k: int = 15,
+        neighbor_limit: int = 200,
+        min_w: int = 1,
+    ) -> List[Dict[str, Any]]:
+      
+        uid = str(user_id)
+
+        cy = (
+            # 1) user skills
+            "MATCH (u:User {user_id:$uid})-[:HAS_SKILL]->(us:Skill) "
+            "WITH collect(DISTINCT us) AS uSkills "
+            # 2) neighbor skills (1-hop CO_OCCURS)
+            "UNWIND uSkills AS s "
+            "OPTIONAL MATCH (s)-[c:CO_OCCURS]->(ns:Skill) "
+            "WHERE coalesce(c.w,0) >= $min_w "
+            "WITH uSkills, collect(DISTINCT ns)[0..$neighbor_limit] AS nSkills "
+            # 3) candidate skills = user skills + neighbors
+            "WITH uSkills + nSkills AS relSkills, uSkills AS uSkills2 "
+            # 4) candidate jobs = any job requiring any relevant skill
+            "UNWIND relSkills AS rs "
+            "MATCH (j:Job)-[:REQUIRES]->(rs) "
+            "WITH DISTINCT j, uSkills2 "
+            # 5) job skills
+            "MATCH (j)-[:REQUIRES]->(js:Skill) "
+            # 6) compute shared/co using user skills vs job skills
+            "UNWIND uSkills2 AS us "
+            "OPTIONAL MATCH (us)-[c1:CO_OCCURS]->(js) "
+            "OPTIONAL MATCH (js)-[c2:CO_OCCURS]->(us) "
+            "WITH j, "
+            "count(DISTINCT CASE WHEN us = js THEN us END) AS shared, "
+            "sum(coalesce(c1.w,0)) + sum(coalesce(c2.w,0)) AS co "
+            "WITH j, shared, co, (10.0 * shared + sqrt(co)) AS raw "
+            "ORDER BY raw DESC "
+            "LIMIT $k "
+            "RETURN j.job_id AS job_id, shared AS shared, co AS co, raw AS raw"
+        )
+
+        rows: List[Dict[str, Any]] = []
+        with self.driver.session(database=NEO4J_DATABASE) as s:
+            for r in s.run(
+                cy,
+                uid=uid,
+                k=int(top_k),
+                neighbor_limit=int(neighbor_limit),
+                min_w=int(min_w),
+            ):
+                rows.append(
+                    {
+                        "job_id": str(r["job_id"]),
+                        "shared": int(r["shared"] or 0),
+                        "co": float(r["co"] or 0.0),
+                        "raw": float(r["raw"] or 0.0),
+                    }
+                )
+
+        if not rows:
+            return []
+
+        mx = max((float(x["raw"]) for x in rows), default=0.0)
+        if mx <= 0.0:
+            for x in rows:
+                x["graph_score"] = 0.0
+        else:
+            for x in rows:
+                x["graph_score"] = float(x["raw"]) / float(mx)
+
+        return rows
 
     def stats(self) -> Dict[str, int]:
         with self.driver.session(database=NEO4J_DATABASE) as s:

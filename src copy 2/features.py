@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import os
+
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -29,11 +31,6 @@ from src.config import (
     N_USERS,
 )
 
-
-# ============================================================
-# Helpers
-# ============================================================
-
 def _sha1(x: str) -> str:
     return hashlib.sha1(x.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -43,10 +40,6 @@ def _norm_text(x: Any) -> str:
     return str(x).strip()
 
 def _norm_link(x: Any) -> str:
-    """Normalize job_link for stable joining.
-    We remove whitespace. (We do NOT try to canonicalize beyond that, because
-    your datasets already match on job_link.)
-    """
     return _norm_text(x)
 
 def _pick(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
@@ -65,10 +58,7 @@ def _read_csv_safe(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, encoding="latin-1")
 
 def _skills_to_tokens(raw: Any) -> List[str]:
-    """Parse skills from either:
-      - comma-separated string in one cell (job_skills / skills)
-      - single skill string
-    """
+
     if raw is None:
         return []
     s = str(raw).strip()
@@ -87,15 +77,12 @@ def _skills_to_tokens(raw: Any) -> List[str]:
 
 def parse_skills(raw: Any) -> Set[str]:
     return set(_skills_to_tokens(raw))
-
-
 def load_jobs_df() -> pd.DataFrame:
     """Load jobs table created by the ETL step."""
     return pd.read_csv(JOBS_CSV)
 
 
 def load_users_df() -> pd.DataFrame:
-    """Load users table created by the ETL step."""
     return pd.read_csv(USERS_CSV)
 
 
@@ -104,11 +91,6 @@ def _stable_job_id_from_link(job_link: str, fallback: str) -> str:
     if link:
         return _sha1(link)[:12]
     return _sha1(fallback)[:12]
-
-
-# ============================================================
-# ETL: build jobs/users CSVs
-# ============================================================
 
 def _etl_jobs_from_linkedin(limit: int = MAX_JOBS) -> pd.DataFrame:
     
@@ -203,14 +185,8 @@ def _etl_jobs_from_linkedin(limit: int = MAX_JOBS) -> pd.DataFrame:
     base = base[["job_id", "title", "company_name", "location", "skills", "description", "job_link"]].copy()
     return base
 
-
 def _build_users_from_jobs(jobs: pd.DataFrame, n_users: int = N_USERS, seed: int = 42) -> pd.DataFrame:
-    """
-    Build synthetic users based on jobs' skills and locations.
 
-    Output columns:
-      user_id, name, preferred_location, skills, summary
-    """
     rng = random.Random(seed)
 
     skill_list: List[str] = []
@@ -265,21 +241,22 @@ def _build_users_from_jobs(jobs: pd.DataFrame, n_users: int = N_USERS, seed: int
         uid = f"u{i:06d}"
         sk = sample_skills()
         loc = sample_location()
+        top = [t.strip() for t in sk.split(",") if t.strip()][:3]
+        top_txt = ", ".join(top) if top else "various skills"
+
+        summary = f"Candidate focusing on {top_txt}. Prefers roles in {loc}."
+
         rows.append(
             {
                 "user_id": uid,
                 "name": sample_name(),
                 "preferred_location": loc,
                 "skills": sk,
-                "summary": "AI/CS candidate interested in roles matching skills and location preferences.",
+                "summary": summary,
             }
         )
+
     return pd.DataFrame(rows)
-
-
-# ============================================================
-# Embeddings artifacts
-# ============================================================
 
 def build_job_text(df: pd.DataFrame) -> pd.Series:
     def f(r: pd.Series) -> str:
@@ -343,10 +320,7 @@ def _write_meta(meta: Dict[str, Any]) -> None:
 
 
 def ensure_ready(force: bool = False) -> Dict[str, Any]:
-    """
-    Ensure data/raw and data/processed artifacts exist.
-    If force=True, rebuild everything deterministically.
-    """
+
     meta_now = _pipeline_meta()
     meta_old = _read_meta()
 
@@ -356,7 +330,22 @@ def ensure_ready(force: bool = False) -> Dict[str, Any]:
     out: Dict[str, Any] = {"ok": True, "rebuild_etl": bool(need_etl), "rebuild_emb": bool(need_emb)}
 
     if need_etl:
-        jobs = _etl_jobs_from_linkedin(limit=MAX_JOBS)
+
+        use_spark = str(os.getenv("USE_SPARK_ETL", "0")).lower() in {"1", "true", "yes", "y", "on"}
+
+        if use_spark:
+            from src.spark_etl import etl_jobs_with_spark
+            master = os.getenv("SPARK_MASTER", "local[*]")
+            jobs = etl_jobs_with_spark(
+                linkedin_posts=str(LINKEDIN_POSTS),
+                linkedin_summary=str(LINKEDIN_SUMMARY),
+                linkedin_skills=str(LINKEDIN_SKILLS),
+                limit=MAX_JOBS,
+                master=master,
+            )
+        else:
+            jobs = _etl_jobs_from_linkedin(limit=MAX_JOBS)
+
         users = _build_users_from_jobs(jobs, n_users=N_USERS)
         JOBS_CSV.parent.mkdir(parents=True, exist_ok=True)
         USERS_CSV.parent.mkdir(parents=True, exist_ok=True)
@@ -379,10 +368,7 @@ def ensure_ready(force: bool = False) -> Dict[str, Any]:
     return out
 
 def run_etl(limit: int = MAX_JOBS) -> Dict[str, Any]:
-    """
-    UI-facing wrapper. Builds jobs/users and writes them to data/raw.
-    Returns basic stats.
-    """
+
     jobs = _etl_jobs_from_linkedin(limit=limit)
     users = _build_users_from_jobs(jobs, n_users=N_USERS)
 

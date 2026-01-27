@@ -1,4 +1,9 @@
+version: "3.9"
+
 services:
+  # -------------------------
+  # App (Gradio UI + pipeline)
+  # -------------------------
   app:
     build: .
     container_name: app
@@ -6,7 +11,8 @@ services:
     env_file:
       - .env
     ports:
-      - "7860:7860"
+      - "7860:7860"   # Gradio UI
+      - "4040:4040"   # Spark UI (only visible while a Spark job is running)
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -15,6 +21,8 @@ services:
         condition: service_completed_successfully
       neo4j1:
         condition: service_healthy
+    networks:
+      - jobrecnet
 
   # -------------------------
   # MongoDB Replica Set (rs0)
@@ -23,6 +31,7 @@ services:
     image: mongo:7
     container_name: mongo1
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    # Optional: expose only if you want to connect from your HOST machine (Compass/mongosh)
     ports:
       - "27017:27017"
     volumes:
@@ -32,6 +41,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    networks:
+      - jobrecnet
 
   mongo2:
     image: mongo:7
@@ -44,6 +55,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    networks:
+      - jobrecnet
 
   mongo3:
     image: mongo:7
@@ -56,6 +69,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+    networks:
+      - jobrecnet
 
   mongo-rs-init:
     image: mongo:7
@@ -88,28 +103,39 @@ services:
       ' || exit 1;
       echo 'Mongo replica set ready.';
       "
+    networks:
+      - jobrecnet
 
   # -------------------------
-  # Neo4j (used by code)
+  # Neo4j (skill graph)
   # -------------------------
   neo4j1:
     image: neo4j:5
     container_name: neo4j1
     environment:
       NEO4J_AUTH: "neo4j/jobrecpassword"
+      # optional quality-of-life settings:
+      NEO4J_server_memory_pagecache_size: "512M"
+      NEO4J_server_memory_heap_initial__size: "512M"
+      NEO4J_server_memory_heap_max__size: "512M"
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt
     volumes:
-      - neo4j1:/data
+      - neo4j1_data:/data
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p jobrecpassword 'RETURN 1;' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 30
+    networks:
+      - jobrecnet
+
+networks:
+  jobrecnet:
 
 volumes:
   mongo1_data:
   mongo2_data:
   mongo3_data:
-  neo4j1:
+  neo4j1_data:

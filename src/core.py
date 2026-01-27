@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from functools import lru_cache
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -27,6 +27,7 @@ from src.features import build_user_text, ensure_ready, load_jobs_df, load_users
 from src.stores import (
     rag_knn,
     JobVectorIndex,
+    analytics_popularity,  # ✅ used to get top popular jobs efficiently
     compute_graph_scores,
     ensure_backends_ready,
     get_job_popularity,
@@ -71,11 +72,23 @@ def _l2(v: np.ndarray) -> np.ndarray:
 
 def _minmax(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32)
-    mn = float(np.min(x)) if x.size else 0.0
-    mx = float(np.max(x)) if x.size else 0.0
+    if x.size == 0:
+        return x
+    mn = float(np.min(x))
+    mx = float(np.max(x))
     if mx <= mn + 1e-12:
         return np.zeros_like(x, dtype=np.float32)
     return (x - mn) / (mx - mn)
+
+
+def _unique_preserve_order(items: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
 
 
 @lru_cache(maxsize=1)
@@ -102,18 +115,62 @@ class HybridRecommender:
         ensure_ready()
         self.jobs = load_jobs_df()
         self.users = load_users_df()
+
+        # ✅ Build stable indices once (avoid repeated copy/set_index in every call)
+        self.jobs = self.jobs.copy()
+        self.jobs["job_id"] = self.jobs["job_id"].astype(str)
+        self.jobs_idx = self.jobs.set_index("job_id", drop=False)
+
+        self.users = self.users.copy()
+        self.users["user_id"] = self.users["user_id"].astype(str)
+
+        # ✅ Pre-parse job skills once (overlap retrieval becomes fast)
+        self._job_skills: Dict[str, set[str]] = {}
+        for jid, r in self.jobs_idx.iterrows():
+            self._job_skills[str(jid)] = set(parse_skills(str(r.get("skills", ""))))
+
         ensure_backends_ready()
         self.index = JobVectorIndex()
-        self.alpha = float(HYBRID_ALPHA)
-        self.beta = float(HYBRID_BETA)
-        self.gamma = float(HYBRID_GAMMA)
-        self.delta = float(HYBRID_DELTA)
+
+        # default weights (can be overridden per-call from UI sliders)
+        # ✅ Keep your mapping: alpha=dense, beta=graph, gamma=popularity, delta=overlap
+        self.alpha = float(HYBRID_ALPHA)  # embedding
+        self.beta = float(HYBRID_BETA)    # graph
+        self.gamma = float(HYBRID_GAMMA)  # popularity
+        self.delta = float(HYBRID_DELTA)  # skill overlap
+
+    @staticmethod
+    def _normalized_weights(
+        base_a: float,
+        base_b: float,
+        base_g: float,
+        base_d: float,
+        alpha: float | None,
+        beta: float | None,
+        gamma: float | None,
+        delta: float | None,
+    ) -> Tuple[float, float, float, float]:
+        a = float(base_a if alpha is None else alpha)
+        b = float(base_b if beta is None else beta)
+        g = float(base_g if gamma is None else gamma)
+        d = float(base_d if delta is None else delta)
+
+        s = a + b + g + d
+        if not np.isfinite(s) or s <= 0.0:
+            # safe fallback: pure embedding signal
+            return 1.0, 0.0, 0.0, 0.0
+
+        return a / s, b / s, g / s, d / s
+
     def user_embedding(self, user_id: str) -> np.ndarray:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
         if urow.empty:
             raise ValueError(f"Unknown user_id: {uid}")
-        text = build_user_text(urow.iloc[0])
+
+        # build_user_text expects a DataFrame and returns a Series
+        text = str(build_user_text(urow).iloc[0])
+
         vec = _model().encode([text], normalize_embeddings=False)[0]
         return _l2(np.asarray(vec, dtype=np.float32))
 
@@ -124,14 +181,13 @@ class HybridRecommender:
         qv = _model().encode([q], normalize_embeddings=False)[0]
         qv = _l2(np.asarray(qv, dtype=np.float32))
         hits = self.index.search(qv, int(top_k))
-        jobs = self.jobs.copy()
-        jobs["job_id"] = jobs["job_id"].astype(str)
-        jobs_idx = jobs.set_index("job_id", drop=False)
+
         out: List[Dict[str, Any]] = []
         for jid, score in hits:
-            if jid not in jobs_idx.index:
+            jid = str(jid)
+            if jid not in self.jobs_idx.index:
                 continue
-            r = jobs_idx.loc[jid]
+            r = self.jobs_idx.loc[jid]
             out.append(
                 {
                     "job_id": jid,
@@ -144,46 +200,117 @@ class HybridRecommender:
             )
         return out
 
-    def recommend(self, user_id: str, top_k: int = 20) -> List[Dict[str, Any]]:
+    def _top_overlap_ids(self, u_sk: set[str], k: int) -> List[str]:
+        if k <= 0 or not u_sk:
+            return []
+        scored: List[Tuple[str, int]] = []
+        for jid, j_sk in self._job_skills.items():
+            c = len(u_sk.intersection(j_sk))
+            if c > 0:
+                scored.append((jid, c))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [jid for jid, _ in scored[:k]]
+
+    def _top_popular_ids(self, k: int) -> List[str]:
+        if k <= 0:
+            return []
+        try:
+            top = analytics_popularity(limit=int(k)).get("top_jobs", []) or []
+            # each element is a doc like {"job_id": "...", "views": ...}
+            out = [str(d.get("job_id", "")).strip() for d in top]
+            return [j for j in out if j]
+        except Exception:
+            return []
+
+    def _top_graph_ids(self, user_id: str, k: int) -> List[str]:
+        if k <= 0:
+            return []
+        try:
+            # local import to avoid import-time failures
+            from src.neo4j_store import get_neo4j_graph
+
+            g = get_neo4j_graph()
+            if not g:
+                return []
+            hits = g.graph_search_jobs(
+                user_id=str(user_id),
+                top_k=int(k),
+                neighbor_limit=200,
+                min_w=1,
+            ) or []
+            out = [str(h.get("job_id", "")).strip() for h in hits]
+            return [j for j in out if j]
+        except Exception:
+            return []
+
+    def recommend(
+        self,
+        user_id: str,
+        top_k: int = 20,
+        alpha: float | None = None,
+        beta: float | None = None,
+        gamma: float | None = None,
+        delta: float | None = None,
+    ) -> List[Dict[str, Any]]:
         uid = str(user_id)
         urow = self.users[self.users["user_id"].astype(str) == uid]
         if urow.empty:
             raise ValueError(f"Unknown user_id: {uid}")
 
+        # normalize weights using UI overrides if provided
+        # ✅ keep mapping: alpha=dense, beta=graph, gamma=popularity, delta=overlap
+        a, b, g, d = self._normalized_weights(
+            self.alpha, self.beta, self.gamma, self.delta,
+            alpha, beta, gamma, delta
+        )
+
         u_sk = set(parse_skills(str(urow.iloc[0].get("skills", ""))))
         u_vec = self.user_embedding(uid)
 
-        cand_k = max(int(top_k) * int(OVERSAMPLE), int(top_k))
-        dense_hits = self.index.search(u_vec, cand_k)
-        if not dense_hits:
+        base = max(int(top_k), 1)
+        k_dense = max(base * int(OVERSAMPLE), base)
+        k_graph = max(base * int(OVERSAMPLE), base)
+        k_overlap = max(base * 10, base)
+        k_pop = max(base * 10, base)
+
+        # 1) Dense candidates
+        dense_hits = self.index.search(u_vec, int(k_dense)) or []
+        dense_map = {str(jid): float(s) for jid, s in dense_hits}
+        dense_ids = [str(jid) for jid, _ in dense_hits]
+
+        # 2) Graph candidates (independent)
+        graph_ids = self._top_graph_ids(uid, int(k_graph))
+
+        # 3) Overlap candidates (independent)
+        overlap_ids = self._top_overlap_ids(u_sk, int(k_overlap))
+
+        # 4) Popularity candidates (independent)
+        pop_ids = self._top_popular_ids(int(k_pop))
+
+        # Union candidates (preserve order preference: dense → graph → overlap → pop)
+        cand_ids = _unique_preserve_order(dense_ids + graph_ids + overlap_ids + pop_ids)
+        if not cand_ids:
             return []
 
-        cand_ids = [jid for jid, _ in dense_hits]
-        dense_arr = np.array([float(s) for _, s in dense_hits], dtype=np.float32)
+        # Compute arrays over union
+        dense_arr = np.array([dense_map.get(jid, 0.0) for jid in cand_ids], dtype=np.float32)
 
-        graph_scores = compute_graph_scores(uid, job_ids=cand_ids)
+        graph_scores = compute_graph_scores(uid, job_ids=cand_ids) or {}
         graph_arr = np.array([float(graph_scores.get(jid, 0.0)) for jid in cand_ids], dtype=np.float32)
 
+        # Popularity per candidate (this is OK now because union pool is limited)
         pop_arr = np.array([float(get_job_popularity(jid)) for jid in cand_ids], dtype=np.float32)
-
-        jobs = self.jobs.copy()
-        jobs["job_id"] = jobs["job_id"].astype(str)
-        jobs_idx = jobs.set_index("job_id", drop=False)
 
         overlap_counts: List[int] = []
         overlap_skills: List[str] = []
         for jid in cand_ids:
-            if jid not in jobs_idx.index:
-                overlap_counts.append(0)
-                overlap_skills.append("")
-                continue
-            j_sk = set(parse_skills(str(jobs_idx.loc[jid].get("skills", ""))))
-            inter = sorted(list(u_sk.intersection(j_sk)))
+            inter = sorted(list(u_sk.intersection(self._job_skills.get(jid, set()))))
             overlap_counts.append(len(inter))
             overlap_skills.append(", ".join(inter))
 
         overlap_arr = np.array(overlap_counts, dtype=np.float32)
 
+        # Normalize signals within candidate pool
         dense_n = _minmax(dense_arr)
         graph_n = _minmax(graph_arr)
         pop_n = _minmax(np.log1p(pop_arr))
@@ -191,14 +318,14 @@ class HybridRecommender:
 
         recs: List[Rec] = []
         for i, jid in enumerate(cand_ids):
-            if jid not in jobs_idx.index:
+            if jid not in self.jobs_idx.index:
                 continue
-            r = jobs_idx.loc[jid]
+            r = self.jobs_idx.loc[jid]
             hybrid = (
-                self.alpha * float(dense_n[i])
-                + self.beta * float(graph_n[i])
-                + self.gamma * float(pop_n[i])
-                + self.delta * float(overlap_n[i])
+                a * float(dense_n[i])
+                + b * float(graph_n[i])
+                + g * float(pop_n[i])
+                + d * float(overlap_n[i])
             )
             recs.append(
                 Rec(
@@ -219,7 +346,16 @@ class HybridRecommender:
         picked = recs[: int(top_k)]
 
         out = [asdict(r) for r in picked]
-        log_event("recommend", {"user_id": uid, "top_k": int(top_k), "returned": len(out)})
+        log_event(
+            "recommend",
+            {
+                "user_id": uid,
+                "top_k": int(top_k),
+                "returned": len(out),
+                "candidate_pool": len(cand_ids),
+                "weights": {"alpha": a, "beta": b, "gamma": g, "delta": d},
+            },
+        )
         return out
 
     def recommend_graph_only(
@@ -229,13 +365,6 @@ class HybridRecommender:
         neighbor_limit: int = 200,
         min_w: int = 1,
     ) -> List[Dict[str, Any]]:
-        """
-        Pure graph-based job retrieval + ranking using Neo4j only (no FAISS, no Mongo popularity).
-
-        The ranking uses:
-            raw = 10*shared_skills + sqrt(co_occurrence_sum)
-        and returns results sorted by raw descending (and a normalized graph_score in [0..1]).
-        """
         from src.neo4j_store import get_neo4j_graph  # local import to avoid import-time Neo4j failures
 
         uid = str(user_id)
@@ -252,16 +381,12 @@ class HybridRecommender:
         if not hits:
             return []
 
-        jobs = self.jobs.copy()
-        jobs["job_id"] = jobs["job_id"].astype(str)
-        jobs_idx = jobs.set_index("job_id", drop=False)
-
         out: List[Dict[str, Any]] = []
         for h in hits:
             jid = str(h.get("job_id", ""))
-            if not jid or jid not in jobs_idx.index:
+            if not jid or jid not in self.jobs_idx.index:
                 continue
-            r = jobs_idx.loc[jid]
+            r = self.jobs_idx.loc[jid]
             out.append(
                 {
                     "job_id": jid,
@@ -345,7 +470,17 @@ def explain_rag(user_id: str, recs: List[Dict[str, Any]], jobs_df) -> List[str]:
         )
 
         query = f"{u_text} {title} skills {skills}\n{desc[:800]}"
-        chunks = rag_knn(query, k=4, job_id=jid) or []
+        qv = _model().encode([query], normalize_embeddings=False)[0]
+        qv = _l2(np.asarray(qv, dtype=np.float32))
+
+        # get more, then filter to this job_id
+        all_chunks = rag_knn(qv, k=30) or []
+        chunks = [c for c in all_chunks if str(c.get("job_id", "")) == jid][:4]
+
+        # fallback: if nothing matches that job_id, just use top chunks
+        if not chunks:
+            chunks = all_chunks[:4]
+
         if chunks:
             sources = _format_sources(chunks)
             evidence = evidence + "\nSources:\n" + sources

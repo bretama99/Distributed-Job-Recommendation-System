@@ -156,16 +156,7 @@ class Neo4jGraphStore:
         neighbor_limit: int = 200,
         min_w: int = 1,
     ) -> List[Dict[str, Any]]:
-        """
-        Pure graph-based retrieval + ranking (no FAISS).
-
-        Returns a list of dicts with:
-        - job_id
-        - shared (exact overlapping skill count)
-        - co (sum of CO_OCCURS weights between user skills and job skills)
-        - raw (10*shared + sqrt(co))
-        - graph_score (raw normalized to [0..1] within the returned set)
-        """
+      
         uid = str(user_id)
 
         cy = (
